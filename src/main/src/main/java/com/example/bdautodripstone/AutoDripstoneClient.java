@@ -1,6 +1,8 @@
 package com.example.bdautodripstone;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
@@ -10,6 +12,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Items;
+import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
@@ -18,6 +21,8 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 public class AutoDripstoneClient implements ClientModInitializer {
+    private boolean enabled = false;
+
     private BlockPos pending = null;
     private int phase = 0; // 0 = nic, 1 = czekam na klape, 2 = kucam, 3 = sprzatam
     private int timer = 0;
@@ -27,8 +32,20 @@ public class AutoDripstoneClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        // komenda /BD (i /bd) wlacza i wylacza moda
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            for (String name : new String[]{"BD", "bd"}) {
+                dispatcher.register(ClientCommandManager.literal(name).executes(context -> {
+                    enabled = !enabled;
+                    context.getSource().sendFeedback(Text.literal(
+                            enabled ? "§aAutoDripstone: WŁĄCZONY" : "§cAutoDripstone: WYŁĄCZONY"));
+                    return 1;
+                }));
+            }
+        });
+
         UseBlockCallback.EVENT.register((player, world, hand, hit) -> {
-            if (world.isClient() && hand == Hand.MAIN_HAND && phase == 0) {
+            if (enabled && world.isClient() && hand == Hand.MAIN_HAND && phase == 0) {
                 BlockPos pos = hit.getBlockPos();
                 if (world.getBlockState(pos).getBlock() instanceof TrapdoorBlock) {
                     pending = pos;
@@ -38,6 +55,7 @@ public class AutoDripstoneClient implements ClientModInitializer {
             }
             return ActionResult.PASS;
         });
+
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
     }
 
