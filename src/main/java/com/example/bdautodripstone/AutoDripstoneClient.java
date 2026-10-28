@@ -9,6 +9,9 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Items;
@@ -21,7 +24,13 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 public class AutoDripstoneClient implements ClientModInitializer {
-    private boolean enabled = false;
+    public static boolean enabled = false;
+    public static int mode = 0; // 0 = wolny, 1 = szybki, 2 = blyskawica
+    private static boolean openGui = false;
+
+    // minimalny odstep miedzy postawionymi dripstone (ms) dla kazdego trybu
+    private static final long[] COOLDOWN_MS = {1000, 400, 0};
+    private long lastPlaceMs = 0;
 
     private BlockPos pending = null;
     private int phase = 0; // 0 = nic, 1 = czekam na klape, 2 = przywracam slot
@@ -34,8 +43,8 @@ public class AutoDripstoneClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // komenda /BD (i /bd) wlacza i wylacza moda
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            // /BD (i /bd) wlacza i wylacza moda
             for (String name : new String[]{"BD", "bd"}) {
                 dispatcher.register(ClientCommandManager.literal(name).executes(context -> {
                     enabled = !enabled;
@@ -44,15 +53,23 @@ public class AutoDripstoneClient implements ClientModInitializer {
                     return 1;
                 }));
             }
+            // /bdgui otwiera okno z ustawieniami
+            for (String name : new String[]{"bdgui", "BDGUI"}) {
+                dispatcher.register(ClientCommandManager.literal(name).executes(context -> {
+                    openGui = true; // okno otworzy sie w nastepnym ticku, po zamknieciu czatu
+                    return 1;
+                }));
+            }
         });
 
         UseBlockCallback.EVENT.register((player, world, hand, hit) -> {
-            if (enabled && world.isClient() && hand == Hand.MAIN_HAND && phase == 0) {
+            if (enabled && world.isClient() && hand == Hand.MAIN_HAND && phase == 0
+                    && System.currentTimeMillis() - lastPlaceMs >= COOLDOWN_MS[mode]) {
                 BlockPos pos = hit.getBlockPos();
                 if (world.getBlockState(pos).getBlock() instanceof TrapdoorBlock) {
                     pending = pos;
                     phase = 1;
-                    timer = 4; // czekamy az serwer zmieni stan klapy
+                    timer = (mode == 2) ? 2 : 4; // czekamy az serwer zmieni stan klapy
                 }
             }
             return ActionResult.PASS;
@@ -62,10 +79,14 @@ public class AutoDripstoneClient implements ClientModInitializer {
     }
 
     private void say(ClientPlayerEntity player, String text) {
-        player.sendMessage(Text.literal(text), false);
+        player.sendMessage(Text.literal(text), true); // nad paskiem hotbara
     }
 
     private void tick(MinecraftClient client) {
+        if (openGui) {
+            openGui = false;
+            client.setScreen(new BdScreen());
+        }
         if (phase == 0) {
             return;
         }
@@ -153,14 +174,69 @@ public class AutoDripstoneClient implements ClientModInitializer {
 
         previousSlot = inv.selectedSlot;
         inv.selectedSlot = dripSlot;
-        phase = 2; // ustawiamy przed klikniem, zeby wlasne klikniecie nie uruchomilo moda ponownie
-        timer = 2;
+        phase = 2; // przed klikniem, zeby wlasne klikniecie nie uruchomilo moda ponownie
+        timer = (mode == 2) ? 1 : 2;
+        lastPlaceMs = System.currentTimeMillis();
         ActionResult result = client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
         player.swingHand(Hand.MAIN_HAND);
-        if (result.isAccepted()) {
-            say(player, "§aBD: dripstone wysłany do postawienia");
-        } else {
+        if (!result.isAccepted()) {
             say(player, "§cBD: nie udało się postawić (wynik: " + result + ")");
+        }
+    }
+
+    // okno /bdgui
+    public static class BdScreen extends Screen {
+        private static final String[] NAMES = {"Wolny (1/s)", "Szybki (2-3/s)", "Błyskawica (max)"};
+        private ButtonWidget toggleButton;
+        private final ButtonWidget[] modeButtons = new ButtonWidget[3];
+
+        public BdScreen() {
+            super(Text.literal("BD-autodripstone"));
+        }
+
+        @Override
+        protected void init() {
+            int cx = this.width / 2;
+            int y = this.height / 2 - 55;
+
+            toggleButton = ButtonWidget.builder(Text.empty(), b -> {
+                enabled = !enabled;
+                refresh();
+            }).dimensions(cx - 100, y, 200, 20).build();
+            addDrawableChild(toggleButton);
+
+            for (int i = 0; i < 3; i++) {
+                final int index = i;
+                modeButtons[i] = ButtonWidget.builder(Text.empty(), b -> {
+                    mode = index;
+                    refresh();
+                }).dimensions(cx - 100, y + 30 + i * 25, 200, 20).build();
+                addDrawableChild(modeButtons[i]);
+            }
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("Zamknij"), b -> close())
+                    .dimensions(cx - 100, y + 115, 200, 20).build());
+
+            refresh();
+        }
+
+        private void refresh() {
+            toggleButton.setMessage(Text.literal(enabled ? "Mod: §aWŁĄCZONY" : "Mod: §cWYŁĄCZONY"));
+            for (int i = 0; i < 3; i++) {
+                modeButtons[i].setMessage(Text.literal((mode == i ? "§a> " : "") + NAMES[i]));
+            }
+        }
+
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            super.render(context, mouseX, mouseY, delta);
+            context.drawCenteredTextWithShadow(this.textRenderer, this.title,
+                    this.width / 2, this.height / 2 - 75, 0xFFFFFF);
+        }
+
+        @Override
+        public boolean shouldPause() {
+            return false;
         }
     }
 }
