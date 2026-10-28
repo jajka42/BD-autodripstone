@@ -24,12 +24,13 @@ public class AutoDripstoneClient implements ClientModInitializer {
     private boolean enabled = false;
 
     private BlockPos pending = null;
-    private int phase = 0; // 0 = nic, 1 = czekam na klape, 2 = czekam na kucanie, 3 = sprzatam
+    private int phase = 0; // 0 = nic, 1 = czekam na klape, 2 = przywracam slot
     private int timer = 0;
-    private int waited = 0;
-    private int dripSlot = -1;
     private int previousSlot = -1;
-    private boolean wasSneaking = false;
+
+    private static final Direction[] SIDES = {
+            Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
+    };
 
     @Override
     public void onInitializeClient() {
@@ -75,72 +76,91 @@ public class AutoDripstoneClient implements ClientModInitializer {
         }
         PlayerInventory inv = player.getInventory();
 
-        if (phase == 1) {
+        if (phase == 2) {
             if (--timer > 0) {
                 return;
             }
-            BlockState state = client.world.getBlockState(pending);
-            if (!(state.getBlock() instanceof TrapdoorBlock)) {
-                phase = 0;
-                return;
-            }
-            if (state.get(TrapdoorBlock.OPEN)) {
-                // klapa otwarta, dripstone spada sam
-                phase = 0;
-                return;
-            }
-            if (state.get(TrapdoorBlock.HALF) != BlockHalf.BOTTOM) {
-                say(player, "§cBD: klapa musi byc w dolnej polowie bloku");
-                phase = 0;
-                return;
-            }
-            dripSlot = -1;
-            for (int i = 0; i < 9; i++) {
-                if (inv.getStack(i).isOf(Items.POINTED_DRIPSTONE)) {
-                    dripSlot = i;
-                    break;
-                }
-            }
-            if (dripSlot == -1) {
-                say(player, "§cBD: brak pointed dripstone w hotbarze");
-                phase = 0;
-                return;
-            }
-            previousSlot = inv.selectedSlot;
-            wasSneaking = client.options.sneakKey.isPressed();
-            inv.selectedSlot = dripSlot;
-            client.options.sneakKey.setPressed(true); // kucniecie, zeby nie otworzyc klapy
-            waited = 0;
-            phase = 2;
-        } else if (phase == 2) {
-            waited++;
-            if (waited < 4) {
-                return; // serwer musi dostac informacje o kucaniu
-            }
-            if (!player.isSneaking() && waited < 15) {
-                return; // czekamy az postac naprawde kuca
-            }
-            BlockPos pos = pending;
-            BlockHitResult hit = new BlockHitResult(
-                    new Vec3d(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5),
-                    Direction.DOWN, pos, false);
-            ActionResult result = client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
-            player.swingHand(Hand.MAIN_HAND);
-            if (result.isAccepted()) {
-                say(player, "§aBD: dripstone wysłany do postawienia");
-            } else {
-                say(player, "§cBD: nie udało się postawić (wynik: " + result + ")");
-            }
-            timer = 2;
-            phase = 3;
-        } else {
-            if (--timer > 0) {
-                return;
-            }
-            client.options.sneakKey.setPressed(wasSneaking);
             inv.selectedSlot = previousSlot;
             pending = null;
             phase = 0;
+            return;
+        }
+
+        // phase == 1
+        if (--timer > 0) {
+            return;
+        }
+        BlockState state = client.world.getBlockState(pending);
+        if (!(state.getBlock() instanceof TrapdoorBlock)) {
+            phase = 0;
+            return;
+        }
+        if (state.get(TrapdoorBlock.OPEN)) {
+            // klapa otwarta, dripstone spada sam
+            phase = 0;
+            return;
+        }
+        if (state.get(TrapdoorBlock.HALF) != BlockHalf.BOTTOM) {
+            say(player, "§cBD: klapa musi byc w dolnej polowie bloku");
+            phase = 0;
+            return;
+        }
+
+        BlockPos target = pending.down();
+        if (!client.world.getBlockState(target).isReplaceable()) {
+            say(player, "§cBD: pod klapa nie ma wolnego miejsca");
+            phase = 0;
+            return;
+        }
+
+        int dripSlot = -1;
+        for (int i = 0; i < 9; i++) {
+            if (inv.getStack(i).isOf(Items.POINTED_DRIPSTONE)) {
+                dripSlot = i;
+                break;
+            }
+        }
+        if (dripSlot == -1) {
+            say(player, "§cBD: brak pointed dripstone w hotbarze");
+            phase = 0;
+            return;
+        }
+
+        // szukamy pelnego bloku obok miejsca, w ktory mozna kliknac (bez klikania klapy)
+        BlockPos support = null;
+        Direction face = null;
+        for (Direction d : SIDES) {
+            BlockPos n = target.offset(d);
+            BlockState ns = client.world.getBlockState(n);
+            if (ns.getBlock() instanceof TrapdoorBlock || ns.hasBlockEntity()) {
+                continue;
+            }
+            if (ns.isSideSolidFullSquare(client.world, n, d.getOpposite())) {
+                support = n;
+                face = d.getOpposite();
+                break;
+            }
+        }
+        if (support == null) {
+            say(player, "§cBD: brak pelnego bloku obok miejsca pod klapa");
+            phase = 0;
+            return;
+        }
+
+        Vec3d hitPos = Vec3d.ofCenter(support).add(
+                face.getOffsetX() * 0.5, face.getOffsetY() * 0.5, face.getOffsetZ() * 0.5);
+        BlockHitResult hit = new BlockHitResult(hitPos, face, support, false);
+
+        previousSlot = inv.selectedSlot;
+        inv.selectedSlot = dripSlot;
+        phase = 2; // ustawiamy przed klikniem, zeby wlasne klikniecie nie uruchomilo moda ponownie
+        timer = 2;
+        ActionResult result = client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+        player.swingHand(Hand.MAIN_HAND);
+        if (result.isAccepted()) {
+            say(player, "§aBD: dripstone wysłany do postawienia");
+        } else {
+            say(player, "§cBD: nie udało się postawić (wynik: " + result + ")");
         }
     }
 }
