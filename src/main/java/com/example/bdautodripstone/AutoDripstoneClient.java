@@ -31,13 +31,13 @@ public class AutoDripstoneClient implements ClientModInitializer {
 
     // minimalny odstep miedzy postawionymi dripstone (ms) dla kazdego trybu
     private static final long[] COOLDOWN_MS = {1000, 400, 0};
-    private static final int MAX_WAIT_TICKS = 6;
+    private static final int MAX_RETRIES = 4;
     private long lastPlaceMs = 0;
 
     private BlockPos pending = null;
-    private int phase = 0; // 0 = nic, 1 = czekam na postawienie
+    private int phase = 0; // 0 = nic, 1 = stawiam, 2 = sprawdzam wynik
     private int timer = 0;
-    private int waited = 0;
+    private int retries = 0;
 
     private static final Direction[] SIDES = {
             Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
@@ -65,13 +65,13 @@ public class AutoDripstoneClient implements ClientModInitializer {
         });
 
         UseBlockCallback.EVENT.register((player, world, hand, hit) -> {
-            if (enabled && world.isClient() && hand == Hand.MAIN_HAND && phase == 0
+            if (enabled && world.isClient() && hand == Hand.MAIN_HAND
                     && System.currentTimeMillis() - lastPlaceMs >= COOLDOWN_MS[mode]) {
                 BlockPos pos = hit.getBlockPos();
                 if (world.getBlockState(pos).getBlock() instanceof TrapdoorBlock) {
                     pending = pos;
                     phase = 1;
-                    waited = 0;
+                    retries = 0;
                     timer = (mode == 2) ? 1 : 3;
                 }
             }
@@ -109,16 +109,13 @@ public class AutoDripstoneClient implements ClientModInitializer {
         }
 
         BlockPos target = pending.down();
-        BlockState targetState = client.world.getBlockState(target);
-        if (targetState.isOf(Blocks.POINTED_DRIPSTONE)) {
-            phase = 0; // juz tam wisi
+        if (client.world.getBlockState(target).isOf(Blocks.POINTED_DRIPSTONE)) {
+            phase = 0; // dripstone juz wisi (postawiony albo nie zdazyl spasc)
             return;
         }
-        if (!targetState.isReplaceable()) {
-            // poprzedni dripstone jeszcze spada, czekamy chwile az miejsce sie zwolni
-            if (++waited > MAX_WAIT_TICKS) {
-                phase = 0;
-            }
+
+        if (phase == 2 && ++retries > MAX_RETRIES) {
+            phase = 0; // serwer nie przyjal, poddajemy sie
             return;
         }
 
@@ -161,12 +158,13 @@ public class AutoDripstoneClient implements ClientModInitializer {
         int previousSlot = inv.selectedSlot;
         inv.selectedSlot = dripSlot;
         lastPlaceMs = System.currentTimeMillis();
-        // phase zostaje 1 podczas klikniecia, zeby wlasne klikniecie nie uruchomilo moda ponownie
+        // strzelamy od razu, bez czekania az nasz widok swiata pokaze wolne miejsce
         client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
         player.swingHand(Hand.MAIN_HAND);
         inv.selectedSlot = previousSlot;
-        pending = null;
-        phase = 0;
+
+        phase = 2; // za chwile sprawdzimy, czy serwer przyjal
+        timer = (mode == 2) ? 2 : 3;
     }
 
     // okno /bdgui
